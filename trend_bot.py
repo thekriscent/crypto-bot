@@ -1,10 +1,13 @@
 import time
+from datetime import datetime, timezone
+
 import requests
 
-from journal import log_entry
+from journal import init_storage, log_entry, log_tick
 
 COINBASE_TICKER_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 LOG_FILE = "trend_bot_log.json"
+DB_FILE = "trend_bot.db"
 
 SCAN_INTERVAL = 5
 COOLDOWN_SECONDS = 60
@@ -339,12 +342,20 @@ def print_simulation_result(sim):
 
 
 def run():
+    init_storage(db_filename=DB_FILE)
     print("Starting scored trend bot...\n")
 
     while True:
         try:
             now_ts = time.time()
             current_price = get_btc_spot_price()
+            observed_at_utc = datetime.now(timezone.utc).isoformat()
+            log_tick(
+                price=current_price,
+                observed_at_epoch=now_ts,
+                observed_at_utc=observed_at_utc,
+                source=COINBASE_TICKER_URL,
+            )
 
             price_history.append((now_ts, current_price))
             prune_history(now_ts)
