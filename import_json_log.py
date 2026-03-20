@@ -133,7 +133,7 @@ def insert_simulation(conn, market_id, event_log_id, entry):
             entry.get("move_5m"),
             entry.get("up_score"),
             entry.get("down_score"),
-            1 if entry["model"] == choose_model(entry["signal_state"]) else 0,
+            1 if entry["model"] == choose_model(entry["signal_state"], entry) else 0,
             "COMPLETED" if entry.get("done") else "OPEN",
         ),
     )

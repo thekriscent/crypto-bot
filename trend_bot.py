@@ -470,7 +470,8 @@ def run():
             for sim in open_simulations:
                 if not sim["done"] or sim.get("finalized"):
                     continue
-                sim["selected"] = (sim["model"] == choose_model(sim["signal_state"]))
+                selected_model = choose_model(sim["signal_state"], sim)
+                sim["selected"] = (selected_model is not None and sim["model"] == selected_model)
                 if all(cp in sim.get("checkpoint_persisted", set()) for cp in CHECKPOINTS):
                     complete_persisted_simulation(sim, LOG_FILE)
                     sim["finalized"] = True
