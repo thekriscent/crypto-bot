@@ -5,6 +5,8 @@ from storage import initialize_database
 
 
 CHECKPOINTS = (60, 180, 300)
+DEFAULT_CUMULATIVE_HORIZON = 300
+DEFAULT_NOTIONAL = 10000.0
 MODEL_SWAP = {
     "continuation": "fade",
     "fade": "continuation",
@@ -181,12 +183,71 @@ def build_reversed_comparison_rows(stats, metric_key):
     return rows
 
 
+def query_selected_cumulative_curve(conn, checkpoint_seconds, notional):
+    return fetch_rows(
+        conn,
+        """
+        SELECT
+            s.id AS simulation_id,
+            s.timestamp_utc,
+            s.model,
+            s.signal_state,
+            s.trade_direction,
+            s.entry_price,
+            sc.pnl_pct,
+            (? * sc.pnl_pct) AS trade_pnl_dollars
+        FROM simulations s
+        JOIN simulation_checkpoints sc
+            ON sc.simulation_id = s.id
+        WHERE s.status = 'COMPLETED'
+          AND s.selected = 1
+          AND sc.checkpoint_seconds = ?
+        ORDER BY s.timestamp_utc, s.id
+        """,
+        (notional, checkpoint_seconds),
+    )
+
+
+def build_cumulative_curve_rows(rows):
+    cumulative = 0.0
+    output = []
+    for simulation_id, timestamp_utc, model, signal_state, trade_direction, entry_price, pnl_pct, trade_pnl_dollars in rows:
+        cumulative += trade_pnl_dollars
+        output.append(
+            (
+                simulation_id,
+                timestamp_utc,
+                model,
+                signal_state,
+                trade_direction,
+                entry_price,
+                pnl_pct,
+                trade_pnl_dollars,
+                cumulative,
+            )
+        )
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze trading bot results from SQLite.")
     parser.add_argument(
         "--db",
         default="trend_bot.db",
         help="Path to the SQLite database file (default: trend_bot.db)",
+    )
+    parser.add_argument(
+        "--cumulative-horizon",
+        type=int,
+        default=DEFAULT_CUMULATIVE_HORIZON,
+        choices=CHECKPOINTS,
+        help="Checkpoint horizon in seconds for selected-only cumulative PnL (default: 300)",
+    )
+    parser.add_argument(
+        "--notional",
+        type=float,
+        default=DEFAULT_NOTIONAL,
+        help="Fixed dollar notional used for trade PnL conversion (default: 10000)",
     )
     args = parser.parse_args()
 
@@ -350,6 +411,30 @@ def main():
                 "rev_300s",
             ),
             build_reversed_comparison_rows(model_checkpoint_stats, "cumulative_pnl_pct"),
+        )
+
+        cumulative_curve_rows = build_cumulative_curve_rows(
+            query_selected_cumulative_curve(
+                conn,
+                checkpoint_seconds=args.cumulative_horizon,
+                notional=args.notional,
+            )[1]
+        )
+
+        print_table(
+            f"7. Selected-only cumulative PnL curve ({args.cumulative_horizon}s, ${args.notional:.0f} notional)",
+            (
+                "simulation_id",
+                "timestamp_utc",
+                "model",
+                "signal_state",
+                "trade_direction",
+                "entry_price",
+                "pnl_pct",
+                "trade_pnl_$",
+                "cumulative_pnl_$",
+            ),
+            cumulative_curve_rows[-20:],
         )
     finally:
         conn.close()
