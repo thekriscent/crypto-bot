@@ -104,7 +104,7 @@ def record_error_event(source, error, context=None, timestamp_utc=None):
         print(f"Error logging failure ({source}): {error} | logging_error={logging_error}")
 
 
-def log_tick(price, observed_at_epoch, observed_at_utc=None, source=None, raw_payload=None):
+def log_tick(price, observed_at_epoch, observed_at_utc=None, source=None, raw_payload=None, diagnostics=None):
     if not _storage_config["initialized"]:
         init_storage()
 
@@ -116,6 +116,7 @@ def log_tick(price, observed_at_epoch, observed_at_utc=None, source=None, raw_pa
         market=_storage_config["market"],
         source=source,
         raw_payload=raw_payload,
+        diagnostics=diagnostics,
     )
 
 

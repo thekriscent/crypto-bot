@@ -384,19 +384,21 @@ def run():
             stage = "fetch_price"
             current_price = get_btc_spot_price()
             observed_at_utc = datetime.now(timezone.utc).isoformat()
-            stage = "log_tick"
-            log_tick(
-                price=current_price,
-                observed_at_epoch=now_ts,
-                observed_at_utc=observed_at_utc,
-                source=COINBASE_TICKER_URL,
-            )
 
             price_history.append((now_ts, current_price))
             prune_history(now_ts)
 
             stage = "compute_signal"
             signal, diagnostics = compute_signal(now_ts, current_price)
+
+            stage = "log_tick"
+            log_tick(
+                price=current_price,
+                observed_at_epoch=now_ts,
+                observed_at_utc=observed_at_utc,
+                source=COINBASE_TICKER_URL,
+                diagnostics=diagnostics,
+            )
 
             print(
                 f"BTC: {current_price:.2f} | "

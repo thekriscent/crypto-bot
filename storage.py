@@ -53,6 +53,14 @@ def initialize_database(db_filename, market=None):
                 observed_at_utc TEXT NOT NULL,
                 observed_at_epoch REAL NOT NULL,
                 price REAL NOT NULL,
+                move_1m REAL,
+                move_3m REAL,
+                move_5m REAL,
+                recent_tick_direction TEXT,
+                up_score INTEGER,
+                down_score INTEGER,
+                state_candidate TEXT,
+                cooldown_ok INTEGER,
                 source TEXT,
                 raw_payload_json TEXT
             );
@@ -156,6 +164,7 @@ def initialize_database(db_filename, market=None):
         )
         _migrate_signal_context_columns(conn)
         _migrate_simulations_selected(conn)
+        _migrate_tick_diagnostics_columns(conn)
         ensure_market(conn, market)
 
 
@@ -211,8 +220,18 @@ def log_entry(db_filename, entry, timestamp_utc, market=None):
         return event_log_id
 
 
-def insert_tick(db_filename, observed_at_utc, observed_at_epoch, price, market=None, source=None, raw_payload=None):
+def insert_tick(
+    db_filename,
+    observed_at_utc,
+    observed_at_epoch,
+    price,
+    market=None,
+    source=None,
+    raw_payload=None,
+    diagnostics=None,
+):
     market = market or DEFAULT_MARKET
+    diagnostics = diagnostics or {}
 
     with _connect(db_filename) as conn:
         market_id = ensure_market(conn, market)
@@ -223,16 +242,32 @@ def insert_tick(db_filename, observed_at_utc, observed_at_epoch, price, market=N
                 observed_at_utc,
                 observed_at_epoch,
                 price,
+                move_1m,
+                move_3m,
+                move_5m,
+                recent_tick_direction,
+                up_score,
+                down_score,
+                state_candidate,
+                cooldown_ok,
                 source,
                 raw_payload_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 market_id,
                 observed_at_utc,
                 observed_at_epoch,
                 price,
+                diagnostics.get("move_1m"),
+                diagnostics.get("move_3m"),
+                diagnostics.get("move_5m"),
+                diagnostics.get("recent_tick_direction"),
+                diagnostics.get("up_score"),
+                diagnostics.get("down_score"),
+                diagnostics.get("state_candidate"),
+                1 if diagnostics.get("cooldown_ok") is True else 0 if diagnostics.get("cooldown_ok") is False else None,
                 source,
                 json.dumps(raw_payload, ensure_ascii=False, sort_keys=True)
                 if raw_payload is not None else None,
@@ -480,6 +515,22 @@ def _migrate_signal_context_columns(conn):
     ):
         if column_name not in columns:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {column_name} {column_type}")
+
+
+def _migrate_tick_diagnostics_columns(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(ticks)")}
+    for column_name, column_type in (
+        ("move_1m", "REAL"),
+        ("move_3m", "REAL"),
+        ("move_5m", "REAL"),
+        ("recent_tick_direction", "TEXT"),
+        ("up_score", "INTEGER"),
+        ("down_score", "INTEGER"),
+        ("state_candidate", "TEXT"),
+        ("cooldown_ok", "INTEGER"),
+    ):
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE ticks ADD COLUMN {column_name} {column_type}")
 
 
 def _migrate_simulations_selected(conn):
