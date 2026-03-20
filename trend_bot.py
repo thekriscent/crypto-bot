@@ -3,7 +3,17 @@ from datetime import datetime, timezone
 
 import requests
 
-from journal import init_storage, log_entry, log_tick, recent_news_exists
+from journal import (
+    complete_persisted_simulation,
+    init_storage,
+    log_entry,
+    log_tick,
+    persist_open_simulation,
+    persist_simulation_checkpoint,
+    recent_news_exists,
+    record_error_event,
+    recover_open_simulations,
+)
 from market_context import compute_market_context
 from strategy_selection import choose_model
 
@@ -350,15 +360,31 @@ def build_signal_context(now_ts, current_price, observed_at_utc):
     return compute_market_context(price_history, now_ts, current_price, news_flag)
 
 
+def persist_pending_checkpoints(sim):
+    persisted = sim.setdefault("checkpoint_persisted", set())
+    for checkpoint in CHECKPOINTS:
+        if checkpoint in sim["captured"] and checkpoint not in persisted:
+            persist_simulation_checkpoint(sim, checkpoint)
+            persisted.add(checkpoint)
+
+
 def run():
     init_storage(db_filename=DB_FILE)
+    open_simulations.extend(recover_open_simulations())
     print("Starting scored trend bot...\n")
+    if open_simulations:
+        print(f"Recovered {len(open_simulations)} open simulations from SQLite.\n")
 
     while True:
+        stage = "idle"
+        observed_at_utc = None
+        current_price = None
         try:
             now_ts = time.time()
+            stage = "fetch_price"
             current_price = get_btc_spot_price()
             observed_at_utc = datetime.now(timezone.utc).isoformat()
+            stage = "log_tick"
             log_tick(
                 price=current_price,
                 observed_at_epoch=now_ts,
@@ -369,6 +395,7 @@ def run():
             price_history.append((now_ts, current_price))
             prune_history(now_ts)
 
+            stage = "compute_signal"
             signal, diagnostics = compute_signal(now_ts, current_price)
 
             print(
@@ -384,12 +411,15 @@ def run():
             )
 
             if signal:
+                stage = "build_signal_context"
                 signal.update(build_signal_context(now_ts, current_price, observed_at_utc))
                 print("\nTREND SIGNAL")
                 print(signal)
                 print()
 
+                stage = "log_signal"
                 log_entry(signal, LOG_FILE)
+                stage = "create_open_simulations"
                 new_simulations = create_simulations(signal, now_ts)
                 for sim in new_simulations:
                     for field in (
@@ -400,18 +430,37 @@ def run():
                         "skip_candidate",
                     ):
                         sim[field] = signal[field]
-                open_simulations.extend(new_simulations)
+                    persist_open_simulation(sim)
+                    open_simulations.append(sim)
 
+            stage = "update_simulations"
             completed = update_simulations(now_ts, current_price)
 
-            for sim in completed:
-                sim["selected"] = (sim["model"] == choose_model(sim["signal_state"]))
-                print_simulation_result(sim)
-                log_entry(sim, LOG_FILE)
+            stage = "persist_simulation_checkpoints"
+            for sim in open_simulations:
+                persist_pending_checkpoints(sim)
 
-            open_simulations[:] = [s for s in open_simulations if not s["done"]]
+            stage = "finalize_simulations"
+            for sim in open_simulations:
+                if not sim["done"] or sim.get("finalized"):
+                    continue
+                sim["selected"] = (sim["model"] == choose_model(sim["signal_state"]))
+                if all(cp in sim.get("checkpoint_persisted", set()) for cp in CHECKPOINTS):
+                    complete_persisted_simulation(sim, LOG_FILE)
+                    sim["finalized"] = True
+                    print_simulation_result(sim)
+
+            open_simulations[:] = [s for s in open_simulations if not s.get("finalized")]
 
         except Exception as e:
+            record_error_event(
+                source=f"trend_bot.{stage}",
+                error=e,
+                context={
+                    "observed_at_utc": observed_at_utc,
+                    "current_price": current_price,
+                },
+            )
             print(f"Error: {e}")
 
         time.sleep(SCAN_INTERVAL)

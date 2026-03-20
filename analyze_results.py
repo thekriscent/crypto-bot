@@ -60,13 +60,17 @@ def query_signals_by_state_and_direction(conn):
 
 
 def simulation_filter_clause(selected_only):
-    return "WHERE s.selected = 1" if selected_only else ""
+    clauses = ["s.status = 'COMPLETED'"]
+    if selected_only:
+        clauses.append("s.selected = 1")
+    return f"WHERE {' AND '.join(clauses)}"
 
 
 def checkpoint_where_clause(selected_only):
+    clauses = ["s.status = 'COMPLETED'", "sc.checkpoint_seconds IN (?, ?, ?)"]
     if selected_only:
-        return "WHERE s.selected = 1 AND sc.checkpoint_seconds IN (?, ?, ?)"
-    return "WHERE sc.checkpoint_seconds IN (?, ?, ?)"
+        clauses.insert(1, "s.selected = 1")
+    return f"WHERE {' AND '.join(clauses)}"
 
 
 def query_simulations_by_model_and_direction(conn, selected_only=False):
@@ -102,7 +106,7 @@ def query_average_pnl_by_checkpoint(conn, selected_only=False):
 
 
 def query_win_rate_by_group(conn, group_column, title_column, selected_only=False, exclude_null_column=None):
-    clauses = []
+    clauses = ["s.status = 'COMPLETED'"]
     if selected_only:
         clauses.append("s.selected = 1")
     if exclude_null_column:

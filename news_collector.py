@@ -6,7 +6,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-from storage import initialize_database, insert_news_item
+from journal import init_storage, record_error_event
+from storage import insert_news_item
 
 
 DEFAULT_DB_FILE = "trend_bot.db"
@@ -113,7 +114,7 @@ def fetch_feed(feed_url, timeout=20):
 
 
 def collect_news(db_filename):
-    initialize_database(db_filename)
+    init_storage(db_filename=db_filename)
 
     processed = 0
     inserted = 0
@@ -124,21 +125,40 @@ def collect_news(db_filename):
             xml_bytes = fetch_feed(feed["url"])
             items = parse_feed(xml_bytes)
         except (URLError, ET.ParseError, TimeoutError, ValueError) as exc:
+            record_error_event(
+                source="news_collector.feed",
+                error=exc,
+                context={
+                    "feed_source": feed["source"],
+                    "feed_url": feed["url"],
+                },
+            )
             errors.append((feed["source"], str(exc)))
             continue
 
         for item in items:
-            was_inserted = insert_news_item(
-                db_filename=db_filename,
-                timestamp_utc=utc_now_iso(),
-                published_at=item["published_at"],
-                source=feed["source"],
-                headline=item["headline"],
-                url=item["url"],
-            )
-            processed += 1
-            if was_inserted:
-                inserted += 1
+            try:
+                was_inserted = insert_news_item(
+                    db_filename=db_filename,
+                    timestamp_utc=utc_now_iso(),
+                    published_at=item["published_at"],
+                    source=feed["source"],
+                    headline=item["headline"],
+                    url=item["url"],
+                )
+                processed += 1
+                if was_inserted:
+                    inserted += 1
+            except Exception as exc:
+                record_error_event(
+                    source="news_collector.db_write",
+                    error=exc,
+                    context={
+                        "feed_source": feed["source"],
+                        "headline": item["headline"],
+                        "url": item["url"],
+                    },
+                )
 
     return processed, inserted, errors
 
@@ -152,16 +172,24 @@ def main():
     )
     args = parser.parse_args()
 
-    processed, inserted, errors = collect_news(args.db)
-    print(f"Database: {args.db}")
-    print(f"Feeds configured: {len(FEEDS)}")
-    print(f"Items processed: {processed}")
-    print(f"Items inserted: {inserted}")
+    try:
+        processed, inserted, errors = collect_news(args.db)
+        print(f"Database: {args.db}")
+        print(f"Feeds configured: {len(FEEDS)}")
+        print(f"Items processed: {processed}")
+        print(f"Items inserted: {inserted}")
 
-    if errors:
-        print("Feed errors:")
-        for source, error in errors:
-            print(f"- {source}: {error}")
+        if errors:
+            print("Feed errors:")
+            for source, error in errors:
+                print(f"- {source}: {error}")
+    except Exception as exc:
+        record_error_event(
+            source="news_collector.main",
+            error=exc,
+            context={"db": args.db},
+        )
+        raise
 
 
 if __name__ == "__main__":

@@ -123,6 +123,15 @@ def initialize_database(db_filename, market=None):
                 UNIQUE(url)
             );
 
+            CREATE TABLE IF NOT EXISTS error_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                source TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                context_json TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_event_log_market_time
             ON event_log(market_id, timestamp_utc);
 
@@ -140,6 +149,9 @@ def initialize_database(db_filename, market=None):
 
             CREATE INDEX IF NOT EXISTS idx_news_items_published_time
             ON news_items(published_at);
+
+            CREATE INDEX IF NOT EXISTS idx_error_events_time
+            ON error_events(timestamp_utc);
             """
         )
         _migrate_signal_context_columns(conn)
@@ -189,18 +201,7 @@ def log_entry(db_filename, entry, timestamp_utc, market=None):
 
     with _connect(db_filename) as conn:
         market_id = ensure_market(conn, market)
-        event_log_id = conn.execute(
-            """
-            INSERT INTO event_log (market_id, timestamp_utc, event, payload_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                market_id,
-                timestamp_utc,
-                entry.get("event", "unknown"),
-                json.dumps(entry, ensure_ascii=False, sort_keys=True),
-            ),
-        ).lastrowid
+        event_log_id = _insert_event_log(conn, market_id, timestamp_utc, entry)
 
         if entry.get("event") == "signal":
             _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc)
@@ -280,6 +281,192 @@ def has_recent_news(db_filename, reference_time_utc, lookback_seconds=300):
             ),
         ).fetchone()
         return bool(row[0])
+
+
+def insert_error_event(db_filename, timestamp_utc, source, error_type, error_message, context_json=None):
+    with _connect(db_filename) as conn:
+        conn.execute(
+            """
+            INSERT INTO error_events (
+                timestamp_utc,
+                source,
+                error_type,
+                error_message,
+                context_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp_utc,
+                source,
+                error_type,
+                error_message,
+                context_json,
+            ),
+        )
+
+
+def create_open_simulation(db_filename, entry, timestamp_utc, market=None):
+    market = market or DEFAULT_MARKET
+
+    with _connect(db_filename) as conn:
+        market_id = ensure_market(conn, market)
+        event_log_id = _insert_event_log(conn, market_id, timestamp_utc, entry)
+        simulation_id = _insert_simulation_row(
+            conn,
+            simulation_id=None,
+            event_log_id=event_log_id,
+            market_id=market_id,
+            entry=entry,
+            timestamp_utc=timestamp_utc,
+            status="OPEN",
+        )
+        return simulation_id, event_log_id
+
+
+def persist_simulation_checkpoint(db_filename, simulation_id, checkpoint_seconds, price, pnl_pct):
+    with _connect(db_filename) as conn:
+        conn.execute(
+            """
+            INSERT INTO simulation_checkpoints (
+                simulation_id,
+                checkpoint_seconds,
+                price,
+                pnl_pct
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(simulation_id, checkpoint_seconds) DO UPDATE SET
+                price = excluded.price,
+                pnl_pct = excluded.pnl_pct
+            """,
+            (
+                simulation_id,
+                int(checkpoint_seconds),
+                price,
+                pnl_pct,
+            ),
+        )
+
+
+def finalize_simulation(db_filename, simulation_id, event_log_id, entry, timestamp_utc, market=None):
+    market = market or DEFAULT_MARKET
+
+    with _connect(db_filename) as conn:
+        market_id = ensure_market(conn, market)
+        _update_event_log(conn, event_log_id, market_id, timestamp_utc, entry)
+        _insert_simulation_row(
+            conn,
+            simulation_id=simulation_id,
+            event_log_id=event_log_id,
+            market_id=market_id,
+            entry=entry,
+            timestamp_utc=timestamp_utc,
+            status="COMPLETED",
+        )
+
+
+def load_open_simulations(db_filename):
+    with _connect(db_filename) as conn:
+        simulations = conn.execute(
+            """
+            SELECT
+                id,
+                event_log_id,
+                model,
+                signal_state,
+                signal_direction,
+                trade_direction,
+                entry_price,
+                signal_time_epoch,
+                move_1m,
+                move_3m,
+                move_5m,
+                up_score,
+                down_score,
+                selected,
+                volatility_state,
+                range_position,
+                news_flag,
+                trend_state,
+                skip_candidate
+            FROM simulations
+            WHERE status = 'OPEN'
+            ORDER BY id
+            """
+        ).fetchall()
+
+        rows = []
+        for row in simulations:
+            (
+                simulation_id,
+                event_log_id,
+                model,
+                signal_state,
+                signal_direction,
+                trade_direction,
+                entry_price,
+                signal_time_epoch,
+                move_1m,
+                move_3m,
+                move_5m,
+                up_score,
+                down_score,
+                selected,
+                volatility_state,
+                range_position,
+                news_flag,
+                trend_state,
+                skip_candidate,
+            ) = row
+
+            checkpoints = conn.execute(
+                """
+                SELECT checkpoint_seconds, price, pnl_pct
+                FROM simulation_checkpoints
+                WHERE simulation_id = ?
+                ORDER BY checkpoint_seconds
+                """,
+                (simulation_id,),
+            ).fetchall()
+
+            captured = {
+                int(checkpoint_seconds): {
+                    "price": price,
+                    "pnl_pct": pnl_pct,
+                }
+                for checkpoint_seconds, price, pnl_pct in checkpoints
+            }
+
+            rows.append(
+                {
+                    "db_id": simulation_id,
+                    "event_log_id": event_log_id,
+                    "event": "simulation_result",
+                    "model": model,
+                    "signal_state": signal_state,
+                    "signal_direction": signal_direction,
+                    "trade_direction": trade_direction,
+                    "entry_price": entry_price,
+                    "signal_time": signal_time_epoch,
+                    "captured": captured,
+                    "checkpoint_persisted": set(captured.keys()),
+                    "done": len(captured) >= 3,
+                    "finalized": False,
+                    "move_1m": move_1m,
+                    "move_3m": move_3m,
+                    "move_5m": move_5m,
+                    "up_score": up_score,
+                    "down_score": down_score,
+                    "selected": bool(selected) if selected is not None else None,
+                    "volatility_state": volatility_state,
+                    "range_position": range_position,
+                    "news_flag": bool(news_flag) if news_flag is not None else None,
+                    "trend_state": trend_state,
+                    "skip_candidate": bool(skip_candidate) if skip_candidate is not None else None,
+                }
+            )
+
+        return rows
 
 
 def _migrate_signal_context_columns(conn):
@@ -370,7 +557,102 @@ def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
 
 
 def _insert_simulation(conn, event_log_id, market_id, entry, timestamp_utc):
-    simulation_id = conn.execute(
+    simulation_id = _insert_simulation_row(
+        conn,
+        simulation_id=None,
+        event_log_id=event_log_id,
+        market_id=market_id,
+        entry=entry,
+        timestamp_utc=timestamp_utc,
+        status="COMPLETED" if entry.get("done") else "OPEN",
+    )
+
+    captured = entry.get("captured", {})
+    for checkpoint_seconds, values in sorted(captured.items(), key=lambda item: int(item[0])):
+        conn.execute(
+            """
+            INSERT INTO simulation_checkpoints (
+                simulation_id,
+                checkpoint_seconds,
+                price,
+                pnl_pct
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(simulation_id, checkpoint_seconds) DO UPDATE SET
+                price = excluded.price,
+                pnl_pct = excluded.pnl_pct
+            """,
+            (
+                simulation_id,
+                int(checkpoint_seconds),
+                values["price"],
+                values["pnl_pct"],
+            ),
+        )
+
+
+def _insert_event_log(conn, market_id, timestamp_utc, entry):
+    return conn.execute(
+        """
+        INSERT INTO event_log (market_id, timestamp_utc, event, payload_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            market_id,
+            timestamp_utc,
+            entry.get("event", "unknown"),
+            json.dumps(entry, ensure_ascii=False, sort_keys=True),
+        ),
+    ).lastrowid
+
+
+def _update_event_log(conn, event_log_id, market_id, timestamp_utc, entry):
+    conn.execute(
+        """
+        UPDATE event_log
+        SET market_id = ?,
+            timestamp_utc = ?,
+            event = ?,
+            payload_json = ?
+        WHERE id = ?
+        """,
+        (
+            market_id,
+            timestamp_utc,
+            entry.get("event", "unknown"),
+            json.dumps(entry, ensure_ascii=False, sort_keys=True),
+            event_log_id,
+        ),
+    )
+
+
+def _insert_simulation_row(conn, simulation_id, event_log_id, market_id, entry, timestamp_utc, status):
+    values = (
+        event_log_id,
+        market_id,
+        timestamp_utc,
+        entry["model"],
+        entry["signal_state"],
+        entry["signal_direction"],
+        entry["trade_direction"],
+        entry["entry_price"],
+        entry.get("signal_time"),
+        entry.get("move_1m"),
+        entry.get("move_3m"),
+        entry.get("move_5m"),
+        entry.get("up_score"),
+        entry.get("down_score"),
+        1 if entry.get("selected") is True else 0 if entry.get("selected") is False else None,
+        entry.get("volatility_state"),
+        entry.get("range_position"),
+        1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
+        entry.get("trend_state"),
+        1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
+        status,
+    )
+
+    if simulation_id is None:
+        return conn.execute(
         """
         INSERT INTO simulations (
             event_log_id,
@@ -397,47 +679,35 @@ def _insert_simulation(conn, event_log_id, market_id, entry, timestamp_utc):
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            event_log_id,
-            market_id,
-            timestamp_utc,
-            entry["model"],
-            entry["signal_state"],
-            entry["signal_direction"],
-            entry["trade_direction"],
-            entry["entry_price"],
-            entry.get("signal_time"),
-            entry.get("move_1m"),
-            entry.get("move_3m"),
-            entry.get("move_5m"),
-            entry.get("up_score"),
-            entry.get("down_score"),
-            1 if entry.get("selected") is True else 0 if entry.get("selected") is False else None,
-            entry.get("volatility_state"),
-            entry.get("range_position"),
-            1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
-            entry.get("trend_state"),
-            1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
-            "COMPLETED" if entry.get("done") else "OPEN",
-        ),
+        values,
     ).lastrowid
 
-    captured = entry.get("captured", {})
-    for checkpoint_seconds, values in sorted(captured.items(), key=lambda item: int(item[0])):
-        conn.execute(
-            """
-            INSERT INTO simulation_checkpoints (
-                simulation_id,
-                checkpoint_seconds,
-                price,
-                pnl_pct
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                simulation_id,
-                int(checkpoint_seconds),
-                values["price"],
-                values["pnl_pct"],
-            ),
-        )
+    conn.execute(
+        """
+        UPDATE simulations
+        SET event_log_id = ?,
+            market_id = ?,
+            timestamp_utc = ?,
+            model = ?,
+            signal_state = ?,
+            signal_direction = ?,
+            trade_direction = ?,
+            entry_price = ?,
+            signal_time_epoch = ?,
+            move_1m = ?,
+            move_3m = ?,
+            move_5m = ?,
+            up_score = ?,
+            down_score = ?,
+            selected = ?,
+            volatility_state = ?,
+            range_position = ?,
+            news_flag = ?,
+            trend_state = ?,
+            skip_candidate = ?,
+            status = ?
+        WHERE id = ?
+        """,
+        values + (simulation_id,),
+    )
+    return simulation_id
