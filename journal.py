@@ -88,6 +88,21 @@ def _public_entry(entry):
     return {key: value for key, value in entry.items() if key not in _INTERNAL_SIMULATION_KEYS}
 
 
+def _normalize_finalized_simulation_entry(entry):
+    normalized = dict(entry)
+
+    if normalized.get("skip_candidate") is True:
+        normalized["selected"] = 0
+
+    if (
+        normalized.get("model") == "continuation"
+        and normalized.get("signal_state") in {"EARLY_DOWN", "CONFIRMED_DOWN"}
+    ):
+        normalized["trade_direction"] = "DOWN"
+
+    return normalized
+
+
 def record_error_event(source, error, context=None, timestamp_utc=None):
     try:
         if not _storage_config["initialized"]:
@@ -183,9 +198,11 @@ def complete_persisted_simulation(sim, filename="crypto_signal_log.json"):
     if not _storage_config["initialized"]:
         init_storage()
 
+    normalized_entry = _normalize_finalized_simulation_entry(_public_entry(sim))
+    sim.update(normalized_entry)
     enriched_entry = {
         "timestamp_utc": utc_now_iso(),
-        **_public_entry(sim),
+        **normalized_entry,
     }
 
     finalize_simulation_sqlite(
