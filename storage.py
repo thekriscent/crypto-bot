@@ -83,7 +83,17 @@ def initialize_database(db_filename, market=None):
                 range_position TEXT,
                 news_flag INTEGER,
                 trend_state TEXT,
-                skip_candidate INTEGER
+                skip_candidate INTEGER,
+                high_1h REAL,
+                low_1h REAL,
+                high_24h REAL,
+                low_24h REAL,
+                ma_5m REAL,
+                ma_15m REAL,
+                ma_1h REAL,
+                price_vs_ma_5m_pct REAL,
+                price_vs_ma_15m_pct REAL,
+                price_vs_ma_1h_pct REAL
             );
 
             CREATE TABLE IF NOT EXISTS simulations (
@@ -108,6 +118,16 @@ def initialize_database(db_filename, market=None):
                 news_flag INTEGER,
                 trend_state TEXT,
                 skip_candidate INTEGER,
+                high_1h REAL,
+                low_1h REAL,
+                high_24h REAL,
+                low_24h REAL,
+                ma_5m REAL,
+                ma_15m REAL,
+                ma_1h REAL,
+                price_vs_ma_5m_pct REAL,
+                price_vs_ma_15m_pct REAL,
+                price_vs_ma_1h_pct REAL,
                 status TEXT NOT NULL
             );
 
@@ -165,6 +185,7 @@ def initialize_database(db_filename, market=None):
         _migrate_signal_context_columns(conn)
         _migrate_simulations_selected(conn)
         _migrate_tick_diagnostics_columns(conn)
+        _migrate_traditional_indicator_columns(conn)
         ensure_market(conn, market)
 
 
@@ -440,7 +461,17 @@ def load_open_simulations(db_filename):
                 range_position,
                 news_flag,
                 trend_state,
-                skip_candidate
+                skip_candidate,
+                high_1h,
+                low_1h,
+                high_24h,
+                low_24h,
+                ma_5m,
+                ma_15m,
+                ma_1h,
+                price_vs_ma_5m_pct,
+                price_vs_ma_15m_pct,
+                price_vs_ma_1h_pct
             FROM simulations
             WHERE status = 'OPEN'
             ORDER BY id
@@ -469,6 +500,16 @@ def load_open_simulations(db_filename):
                 news_flag,
                 trend_state,
                 skip_candidate,
+                high_1h,
+                low_1h,
+                high_24h,
+                low_24h,
+                ma_5m,
+                ma_15m,
+                ma_1h,
+                price_vs_ma_5m_pct,
+                price_vs_ma_15m_pct,
+                price_vs_ma_1h_pct,
             ) = row
 
             checkpoints = conn.execute(
@@ -515,6 +556,16 @@ def load_open_simulations(db_filename):
                     "news_flag": bool(news_flag) if news_flag is not None else None,
                     "trend_state": trend_state,
                     "skip_candidate": bool(skip_candidate) if skip_candidate is not None else None,
+                    "high_1h": high_1h,
+                    "low_1h": low_1h,
+                    "high_24h": high_24h,
+                    "low_24h": low_24h,
+                    "ma_5m": ma_5m,
+                    "ma_15m": ma_15m,
+                    "ma_1h": ma_1h,
+                    "price_vs_ma_5m_pct": price_vs_ma_5m_pct,
+                    "price_vs_ma_15m_pct": price_vs_ma_15m_pct,
+                    "price_vs_ma_1h_pct": price_vs_ma_1h_pct,
                 }
             )
 
@@ -550,6 +601,31 @@ def _migrate_tick_diagnostics_columns(conn):
             conn.execute(f"ALTER TABLE ticks ADD COLUMN {column_name} {column_type}")
 
 
+def _migrate_traditional_indicator_columns(conn):
+    indicator_columns = (
+        ("high_1h", "REAL"),
+        ("low_1h", "REAL"),
+        ("high_24h", "REAL"),
+        ("low_24h", "REAL"),
+        ("ma_5m", "REAL"),
+        ("ma_15m", "REAL"),
+        ("ma_1h", "REAL"),
+        ("price_vs_ma_5m_pct", "REAL"),
+        ("price_vs_ma_15m_pct", "REAL"),
+        ("price_vs_ma_1h_pct", "REAL"),
+    )
+
+    signal_columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)")}
+    for column_name, column_type in indicator_columns:
+        if column_name not in signal_columns:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {column_name} {column_type}")
+
+    simulation_columns = {row[1] for row in conn.execute("PRAGMA table_info(simulations)")}
+    for column_name, column_type in indicator_columns:
+        if column_name not in simulation_columns:
+            conn.execute(f"ALTER TABLE simulations ADD COLUMN {column_name} {column_type}")
+
+
 def _migrate_simulations_selected(conn):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(simulations)")}
     if "selected" not in columns:
@@ -568,7 +644,9 @@ def _migrate_simulations_selected(conn):
         """
         UPDATE simulations
         SET selected = CASE
-            WHEN signal_state IN ('EARLY_UP', 'EARLY_DOWN') AND model = 'fade' THEN 1
+            WHEN skip_candidate = 1 THEN 0
+            WHEN signal_state = 'EARLY_UP' AND model = 'fade' THEN 1
+            WHEN signal_state = 'EARLY_DOWN' AND model = 'continuation' AND COALESCE(down_score, 0) > COALESCE(up_score, 0) THEN 1
             WHEN signal_state IN ('CONFIRMED_UP', 'CONFIRMED_DOWN') AND model = 'continuation' THEN 1
             WHEN signal_state IN ('EARLY_UP', 'EARLY_DOWN', 'CONFIRMED_UP', 'CONFIRMED_DOWN') THEN 0
             ELSE selected
@@ -598,9 +676,19 @@ def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
             range_position,
             news_flag,
             trend_state,
-            skip_candidate
+            skip_candidate,
+            high_1h,
+            low_1h,
+            high_24h,
+            low_24h,
+            ma_5m,
+            ma_15m,
+            ma_1h,
+            price_vs_ma_5m_pct,
+            price_vs_ma_15m_pct,
+            price_vs_ma_1h_pct
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_log_id,
@@ -620,6 +708,16 @@ def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
             1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
             entry.get("trend_state"),
             1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
+            entry.get("high_1h"),
+            entry.get("low_1h"),
+            entry.get("high_24h"),
+            entry.get("low_24h"),
+            entry.get("ma_5m"),
+            entry.get("ma_15m"),
+            entry.get("ma_1h"),
+            entry.get("price_vs_ma_5m_pct"),
+            entry.get("price_vs_ma_15m_pct"),
+            entry.get("price_vs_ma_1h_pct"),
         ),
     )
 
@@ -716,6 +814,16 @@ def _insert_simulation_row(conn, simulation_id, event_log_id, market_id, entry, 
         1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
         entry.get("trend_state"),
         1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
+        entry.get("high_1h"),
+        entry.get("low_1h"),
+        entry.get("high_24h"),
+        entry.get("low_24h"),
+        entry.get("ma_5m"),
+        entry.get("ma_15m"),
+        entry.get("ma_1h"),
+        entry.get("price_vs_ma_5m_pct"),
+        entry.get("price_vs_ma_15m_pct"),
+        entry.get("price_vs_ma_1h_pct"),
         status,
     )
 
@@ -743,9 +851,19 @@ def _insert_simulation_row(conn, simulation_id, event_log_id, market_id, entry, 
             news_flag,
             trend_state,
             skip_candidate,
+            high_1h,
+            low_1h,
+            high_24h,
+            low_24h,
+            ma_5m,
+            ma_15m,
+            ma_1h,
+            price_vs_ma_5m_pct,
+            price_vs_ma_15m_pct,
+            price_vs_ma_1h_pct,
             status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         values,
     ).lastrowid
@@ -773,6 +891,16 @@ def _insert_simulation_row(conn, simulation_id, event_log_id, market_id, entry, 
             news_flag = ?,
             trend_state = ?,
             skip_candidate = ?,
+            high_1h = ?,
+            low_1h = ?,
+            high_24h = ?,
+            low_24h = ?,
+            ma_5m = ?,
+            ma_15m = ?,
+            ma_1h = ?,
+            price_vs_ma_5m_pct = ?,
+            price_vs_ma_15m_pct = ?,
+            price_vs_ma_1h_pct = ?,
             status = ?
         WHERE id = ?
         """,

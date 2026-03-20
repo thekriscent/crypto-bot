@@ -70,8 +70,24 @@ def opposite_direction(direction):
     return "DOWN" if direction == "UP" else "UP"
 
 
-def simulation_trade_direction(model, signal_direction):
+def simulation_trade_direction(model, signal_direction, signal_state=None):
     if model == "continuation":
+        if signal_state and signal_state.endswith("_DOWN"):
+            return "DOWN"
+        if signal_state and signal_state.endswith("_UP"):
+            return "UP"
+        return signal_direction
+    if model == "fade":
+        return opposite_direction(signal_direction)
+    return signal_direction
+
+
+def expected_trade_direction(model, signal_direction, signal_state=None):
+    if model == "continuation":
+        if signal_state and signal_state.endswith("_DOWN"):
+            return "DOWN"
+        if signal_state and signal_state.endswith("_UP"):
+            return "UP"
         return signal_direction
     if model == "fade":
         return opposite_direction(signal_direction)
@@ -282,7 +298,11 @@ def create_simulations(signal, now_ts):
             "model": "continuation",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": simulation_trade_direction("continuation", signal["direction"]),
+            "trade_direction": expected_trade_direction(
+                "continuation",
+                signal["direction"],
+                signal["state"],
+            ),
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -298,7 +318,11 @@ def create_simulations(signal, now_ts):
             "model": "fade",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": simulation_trade_direction("fade", signal["direction"]),
+            "trade_direction": expected_trade_direction(
+                "fade",
+                signal["direction"],
+                signal["state"],
+            ),
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -382,9 +406,10 @@ def persist_pending_checkpoints(sim):
 
 def normalize_recovered_simulations(simulations):
     for sim in simulations:
-        expected_direction = simulation_trade_direction(
+        expected_direction = expected_trade_direction(
             sim["model"],
             sim["signal_direction"],
+            sim.get("signal_state"),
         )
         if sim.get("trade_direction") != expected_direction:
             sim["trade_direction"] = expected_direction
@@ -454,6 +479,16 @@ def run():
                         "news_flag",
                         "trend_state",
                         "skip_candidate",
+                        "high_1h",
+                        "low_1h",
+                        "high_24h",
+                        "low_24h",
+                        "ma_5m",
+                        "ma_15m",
+                        "ma_1h",
+                        "price_vs_ma_5m_pct",
+                        "price_vs_ma_15m_pct",
+                        "price_vs_ma_1h_pct",
                     ):
                         sim[field] = signal[field]
                     persist_open_simulation(sim)
@@ -471,7 +506,12 @@ def run():
                 if not sim["done"] or sim.get("finalized"):
                     continue
                 selected_model = choose_model(sim["signal_state"], sim)
-                sim["selected"] = (selected_model is not None and sim["model"] == selected_model)
+                sim["selected"] = 1 if sim["model"] == selected_model else 0
+                if sim["selected"] == 0:
+                    if sim.get("skip_candidate") is True:
+                        sim["skip_reason"] = "SKIP_CANDIDATE_TRUE"
+                    elif selected_model is None:
+                        sim["skip_reason"] = "EARLY_DOWN_SKIP"
                 if all(cp in sim.get("checkpoint_persisted", set()) for cp in CHECKPOINTS):
                     complete_persisted_simulation(sim, LOG_FILE)
                     sim["finalized"] = True
