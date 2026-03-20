@@ -13,6 +13,7 @@ from storage import (
     load_open_simulations as load_open_simulations_sqlite,
     log_entry as log_entry_sqlite,
     persist_simulation_checkpoint as persist_simulation_checkpoint_sqlite,
+    update_open_simulation as update_open_simulation_sqlite,
 )
 
 DEFAULT_DB_FILE = "trend_bot.db"
@@ -160,6 +161,21 @@ def persist_simulation_checkpoint(sim, checkpoint_seconds):
         checkpoint_seconds=checkpoint_seconds,
         price=checkpoint["price"],
         pnl_pct=checkpoint["pnl_pct"],
+    )
+
+
+def sync_open_simulation(sim):
+    if not _storage_config["initialized"]:
+        init_storage()
+
+    timestamp_utc = utc_now_iso()
+    update_open_simulation_sqlite(
+        db_filename=_storage_config["db_filename"],
+        simulation_id=sim["db_id"],
+        event_log_id=sim["event_log_id"],
+        entry={"timestamp_utc": timestamp_utc, **_public_entry(sim)},
+        timestamp_utc=timestamp_utc,
+        market=_storage_config["market"],
     )
 
 

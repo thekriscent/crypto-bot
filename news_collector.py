@@ -1,7 +1,8 @@
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
+import sqlite3
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -11,6 +12,7 @@ from storage import insert_news_item
 
 
 DEFAULT_DB_FILE = "trend_bot.db"
+INITIAL_LOOKBACK_HOURS = 48
 FEEDS = [
     {
         "source": "CoinDesk",
@@ -29,6 +31,10 @@ FEEDS = [
 
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
 
 
 def local_name(tag):
@@ -63,6 +69,15 @@ def normalize_published_at(value):
         dt = dt.replace(tzinfo=timezone.utc)
 
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def parse_feed(xml_bytes):
@@ -113,8 +128,29 @@ def fetch_feed(feed_url, timeout=20):
         return response.read()
 
 
+def get_news_cutoff(db_filename):
+    with sqlite3.connect(db_filename) as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(COALESCE(published_at, timestamp_utc))
+            FROM news_items
+            """
+        ).fetchone()
+    if row and row[0]:
+        return parse_iso_datetime(row[0])
+    return utc_now() - timedelta(hours=INITIAL_LOOKBACK_HOURS)
+
+
+def is_new_enough(item, cutoff_dt):
+    published_at = parse_iso_datetime(item["published_at"]) if item["published_at"] else None
+    if published_at is None:
+        return False
+    return published_at > cutoff_dt
+
+
 def collect_news(db_filename):
     init_storage(db_filename=db_filename)
+    cutoff_dt = get_news_cutoff(db_filename)
 
     processed = 0
     inserted = 0
@@ -137,6 +173,8 @@ def collect_news(db_filename):
             continue
 
         for item in items:
+            if not is_new_enough(item, cutoff_dt):
+                continue
             try:
                 was_inserted = insert_news_item(
                     db_filename=db_filename,
@@ -160,7 +198,7 @@ def collect_news(db_filename):
                     },
                 )
 
-    return processed, inserted, errors
+    return cutoff_dt, processed, inserted, errors
 
 
 def main():
@@ -173,9 +211,10 @@ def main():
     args = parser.parse_args()
 
     try:
-        processed, inserted, errors = collect_news(args.db)
+        cutoff_dt, processed, inserted, errors = collect_news(args.db)
         print(f"Database: {args.db}")
         print(f"Feeds configured: {len(FEEDS)}")
+        print(f"News cutoff: {cutoff_dt.isoformat()}")
         print(f"Items processed: {processed}")
         print(f"Items inserted: {inserted}")
 

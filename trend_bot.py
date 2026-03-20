@@ -13,6 +13,7 @@ from journal import (
     recent_news_exists,
     record_error_event,
     recover_open_simulations,
+    sync_open_simulation,
 )
 from market_context import compute_market_context
 from strategy_selection import choose_model
@@ -63,6 +64,18 @@ def pct_change(old_price, new_price):
     if old_price is None or old_price == 0:
         return None
     return (new_price - old_price) / old_price
+
+
+def opposite_direction(direction):
+    return "DOWN" if direction == "UP" else "UP"
+
+
+def simulation_trade_direction(model, signal_direction):
+    if model == "continuation":
+        return signal_direction
+    if model == "fade":
+        return opposite_direction(signal_direction)
+    return signal_direction
 
 
 def recent_tick_direction():
@@ -263,14 +276,13 @@ def compute_signal(now_ts, current_price):
 
 
 def create_simulations(signal, now_ts):
-    flipped_direction = "DOWN" if signal["direction"] == "UP" else "UP"
     return [
         {
             "event": "simulation_result",
             "model": "continuation",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": flipped_direction,
+            "trade_direction": simulation_trade_direction("continuation", signal["direction"]),
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -286,7 +298,7 @@ def create_simulations(signal, now_ts):
             "model": "fade",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": flipped_direction,
+            "trade_direction": simulation_trade_direction("fade", signal["direction"]),
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -368,9 +380,21 @@ def persist_pending_checkpoints(sim):
             persisted.add(checkpoint)
 
 
+def normalize_recovered_simulations(simulations):
+    for sim in simulations:
+        expected_direction = simulation_trade_direction(
+            sim["model"],
+            sim["signal_direction"],
+        )
+        if sim.get("trade_direction") != expected_direction:
+            sim["trade_direction"] = expected_direction
+            sync_open_simulation(sim)
+    return simulations
+
+
 def run():
     init_storage(db_filename=DB_FILE)
-    open_simulations.extend(recover_open_simulations())
+    open_simulations.extend(normalize_recovered_simulations(recover_open_simulations()))
     print("Starting scored trend bot...\n")
     if open_simulations:
         print(f"Recovered {len(open_simulations)} open simulations from SQLite.\n")

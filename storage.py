@@ -359,6 +359,23 @@ def create_open_simulation(db_filename, entry, timestamp_utc, market=None):
         return simulation_id, event_log_id
 
 
+def update_open_simulation(db_filename, simulation_id, event_log_id, entry, timestamp_utc, market=None):
+    market = market or DEFAULT_MARKET
+
+    with _connect(db_filename) as conn:
+        market_id = ensure_market(conn, market)
+        _update_event_log(conn, event_log_id, market_id, timestamp_utc, entry)
+        _insert_simulation_row(
+            conn,
+            simulation_id=simulation_id,
+            event_log_id=event_log_id,
+            market_id=market_id,
+            entry=entry,
+            timestamp_utc=timestamp_utc,
+            status="OPEN",
+        )
+
+
 def persist_simulation_checkpoint(db_filename, simulation_id, checkpoint_seconds, price, pnl_pct):
     with _connect(db_filename) as conn:
         conn.execute(
