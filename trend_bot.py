@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 
 import requests
 
-from journal import init_storage, log_entry, log_tick
+from journal import init_storage, log_entry, log_tick, recent_news_exists
+from market_context import compute_market_context
+from strategy_selection import choose_model
 
 COINBASE_TICKER_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 LOG_FILE = "trend_bot_log.json"
@@ -19,6 +21,7 @@ CHECKPOINTS = [60, 180, 300]
 EARLY_SCORE_THRESHOLD = 4
 CONFIRMED_SCORE_THRESHOLD = 6
 PULLBACK_SCORE_THRESHOLD = 4
+CONTEXT_HISTORY_SECONDS = (24 * 60 * 60) + 60
 
 price_history = []
 last_signal_time = 0
@@ -34,7 +37,7 @@ def get_btc_spot_price():
 
 def prune_history(now_ts):
     global price_history
-    cutoff = now_ts - max(WINDOWS) - 60
+    cutoff = now_ts - max(CONTEXT_HISTORY_SECONDS, max(WINDOWS) + 60)
     price_history = [(ts, px) for ts, px in price_history if ts >= cutoff]
 
 
@@ -250,13 +253,14 @@ def compute_signal(now_ts, current_price):
 
 
 def create_simulations(signal, now_ts):
+    flipped_direction = "DOWN" if signal["direction"] == "UP" else "UP"
     return [
         {
             "event": "simulation_result",
             "model": "continuation",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": signal["direction"],
+            "trade_direction": flipped_direction,
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -272,7 +276,7 @@ def create_simulations(signal, now_ts):
             "model": "fade",
             "signal_state": signal["state"],
             "signal_direction": signal["direction"],
-            "trade_direction": "DOWN" if signal["direction"] == "UP" else "UP",
+            "trade_direction": flipped_direction,
             "entry_price": signal["price_now"],
             "signal_time": now_ts,
             "captured": {},
@@ -341,6 +345,11 @@ def print_simulation_result(sim):
     print()
 
 
+def build_signal_context(now_ts, current_price, observed_at_utc):
+    news_flag = recent_news_exists(observed_at_utc, lookback_seconds=5 * 60)
+    return compute_market_context(price_history, now_ts, current_price, news_flag)
+
+
 def run():
     init_storage(db_filename=DB_FILE)
     print("Starting scored trend bot...\n")
@@ -375,16 +384,28 @@ def run():
             )
 
             if signal:
+                signal.update(build_signal_context(now_ts, current_price, observed_at_utc))
                 print("\nTREND SIGNAL")
                 print(signal)
                 print()
 
                 log_entry(signal, LOG_FILE)
-                open_simulations.extend(create_simulations(signal, now_ts))
+                new_simulations = create_simulations(signal, now_ts)
+                for sim in new_simulations:
+                    for field in (
+                        "volatility_state",
+                        "range_position",
+                        "news_flag",
+                        "trend_state",
+                        "skip_candidate",
+                    ):
+                        sim[field] = signal[field]
+                open_simulations.extend(new_simulations)
 
             completed = update_simulations(now_ts, current_price)
 
             for sim in completed:
+                sim["selected"] = (sim["model"] == choose_model(sim["signal_state"]))
                 print_simulation_result(sim)
                 log_entry(sim, LOG_FILE)
 

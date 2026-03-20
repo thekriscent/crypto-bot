@@ -70,7 +70,12 @@ def initialize_database(db_filename, market=None):
                 move_3m REAL,
                 move_5m REAL,
                 up_score INTEGER,
-                down_score INTEGER
+                down_score INTEGER,
+                volatility_state TEXT,
+                range_position TEXT,
+                news_flag INTEGER,
+                trend_state TEXT,
+                skip_candidate INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS simulations (
@@ -89,6 +94,12 @@ def initialize_database(db_filename, market=None):
                 move_5m REAL,
                 up_score INTEGER,
                 down_score INTEGER,
+                selected INTEGER,
+                volatility_state TEXT,
+                range_position TEXT,
+                news_flag INTEGER,
+                trend_state TEXT,
+                skip_candidate INTEGER,
                 status TEXT NOT NULL
             );
 
@@ -99,6 +110,17 @@ def initialize_database(db_filename, market=None):
                 price REAL NOT NULL,
                 pnl_pct REAL NOT NULL,
                 UNIQUE(simulation_id, checkpoint_seconds)
+            );
+
+            CREATE TABLE IF NOT EXISTS news_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                published_at TEXT,
+                source TEXT NOT NULL,
+                headline TEXT NOT NULL,
+                url TEXT,
+                UNIQUE(source, headline),
+                UNIQUE(url)
             );
 
             CREATE INDEX IF NOT EXISTS idx_event_log_market_time
@@ -112,8 +134,16 @@ def initialize_database(db_filename, market=None):
 
             CREATE INDEX IF NOT EXISTS idx_ticks_market_time
             ON ticks(market_id, observed_at_utc);
+
+            CREATE INDEX IF NOT EXISTS idx_news_items_collected_time
+            ON news_items(timestamp_utc);
+
+            CREATE INDEX IF NOT EXISTS idx_news_items_published_time
+            ON news_items(published_at);
             """
         )
+        _migrate_signal_context_columns(conn)
+        _migrate_simulations_selected(conn)
         ensure_market(conn, market)
 
 
@@ -209,6 +239,90 @@ def insert_tick(db_filename, observed_at_utc, observed_at_epoch, price, market=N
         )
 
 
+def insert_news_item(db_filename, timestamp_utc, source, headline, url=None, published_at=None):
+    with _connect(db_filename) as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO news_items (
+                timestamp_utc,
+                published_at,
+                source,
+                headline,
+                url
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp_utc,
+                published_at,
+                source,
+                headline,
+                url,
+            ),
+        )
+        return cursor.rowcount > 0
+
+
+def has_recent_news(db_filename, reference_time_utc, lookback_seconds=300):
+    with _connect(db_filename) as conn:
+        row = conn.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM news_items
+                WHERE COALESCE(published_at, timestamp_utc) BETWEEN datetime(?, ? || ' seconds') AND ?
+            )
+            """,
+            (
+                reference_time_utc,
+                -lookback_seconds,
+                reference_time_utc,
+            ),
+        ).fetchone()
+        return bool(row[0])
+
+
+def _migrate_signal_context_columns(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)")}
+    for column_name, column_type in (
+        ("volatility_state", "TEXT"),
+        ("range_position", "TEXT"),
+        ("news_flag", "INTEGER"),
+        ("trend_state", "TEXT"),
+        ("skip_candidate", "INTEGER"),
+    ):
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {column_name} {column_type}")
+
+
+def _migrate_simulations_selected(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(simulations)")}
+    if "selected" not in columns:
+        conn.execute("ALTER TABLE simulations ADD COLUMN selected INTEGER")
+    for column_name, column_type in (
+        ("volatility_state", "TEXT"),
+        ("range_position", "TEXT"),
+        ("news_flag", "INTEGER"),
+        ("trend_state", "TEXT"),
+        ("skip_candidate", "INTEGER"),
+    ):
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE simulations ADD COLUMN {column_name} {column_type}")
+
+    conn.execute(
+        """
+        UPDATE simulations
+        SET selected = CASE
+            WHEN signal_state IN ('EARLY_UP', 'EARLY_DOWN') AND model = 'fade' THEN 1
+            WHEN signal_state IN ('CONFIRMED_UP', 'CONFIRMED_DOWN') AND model = 'continuation' THEN 1
+            WHEN signal_state IN ('EARLY_UP', 'EARLY_DOWN', 'CONFIRMED_UP', 'CONFIRMED_DOWN') THEN 0
+            ELSE selected
+        END
+        WHERE selected IS NULL
+        """
+    )
+
+
 def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
     conn.execute(
         """
@@ -224,9 +338,14 @@ def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
             move_3m,
             move_5m,
             up_score,
-            down_score
+            down_score,
+            volatility_state,
+            range_position,
+            news_flag,
+            trend_state,
+            skip_candidate
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_log_id,
@@ -241,6 +360,11 @@ def _insert_signal(conn, event_log_id, market_id, entry, timestamp_utc):
             entry.get("move_5m"),
             entry.get("up_score"),
             entry.get("down_score"),
+            entry.get("volatility_state"),
+            entry.get("range_position"),
+            1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
+            entry.get("trend_state"),
+            1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
         ),
     )
 
@@ -263,9 +387,15 @@ def _insert_simulation(conn, event_log_id, market_id, entry, timestamp_utc):
             move_5m,
             up_score,
             down_score,
+            selected,
+            volatility_state,
+            range_position,
+            news_flag,
+            trend_state,
+            skip_candidate,
             status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_log_id,
@@ -282,6 +412,12 @@ def _insert_simulation(conn, event_log_id, market_id, entry, timestamp_utc):
             entry.get("move_5m"),
             entry.get("up_score"),
             entry.get("down_score"),
+            1 if entry.get("selected") is True else 0 if entry.get("selected") is False else None,
+            entry.get("volatility_state"),
+            entry.get("range_position"),
+            1 if entry.get("news_flag") is True else 0 if entry.get("news_flag") is False else None,
+            entry.get("trend_state"),
+            1 if entry.get("skip_candidate") is True else 0 if entry.get("skip_candidate") is False else None,
             "COMPLETED" if entry.get("done") else "OPEN",
         ),
     ).lastrowid

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from storage import (
     DEFAULT_MARKET,
+    has_recent_news as has_recent_news_sqlite,
     initialize_database,
     insert_tick as insert_tick_sqlite,
     log_entry as log_entry_sqlite,
@@ -82,4 +83,15 @@ def log_tick(price, observed_at_epoch, observed_at_utc=None, source=None, raw_pa
         market=_storage_config["market"],
         source=source,
         raw_payload=raw_payload,
+    )
+
+
+def recent_news_exists(reference_time_utc, lookback_seconds=300):
+    if not _storage_config["initialized"]:
+        init_storage()
+
+    return has_recent_news_sqlite(
+        db_filename=_storage_config["db_filename"],
+        reference_time_utc=reference_time_utc,
+        lookback_seconds=lookback_seconds,
     )
