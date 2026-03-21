@@ -327,12 +327,12 @@ def has_recent_news(db_filename, reference_time_utc, lookback_seconds=300):
             SELECT EXISTS(
                 SELECT 1
                 FROM news_items
-                WHERE COALESCE(published_at, timestamp_utc) BETWEEN datetime(?, ? || ' seconds') AND ?
+                WHERE unixepoch(COALESCE(published_at, timestamp_utc)) BETWEEN unixepoch(?) - ? AND unixepoch(?)
             )
             """,
             (
                 reference_time_utc,
-                -lookback_seconds,
+                lookback_seconds,
                 reference_time_utc,
             ),
         ).fetchone()
