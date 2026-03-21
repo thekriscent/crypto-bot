@@ -30,7 +30,7 @@ from xauusd_config import (
     SIMULATE_PRICE,
     SIMULATION_BASE_PRICE,
 )
-from xauusd_market_context import compute_xauusd_market_context
+from xauusd_market_context import compute_xauusd_market_context, xauusd_skip_decision
 from xauusd_strategy import (
     calc_pnl_pct,
     choose_model,
@@ -224,6 +224,8 @@ def apply_signal_context(sim, signal):
         "news_flag",
         "trend_state",
         "skip_candidate",
+        "skip_reason",
+        "selection_reason",
         "high_1h",
         "low_1h",
         "high_24h",
@@ -282,6 +284,12 @@ def run():
             if signal:
                 stage = "build_signal_context"
                 signal.update(build_signal_context(now_ts, current_price, observed_at_utc))
+                signal["skip_candidate"], signal["skip_reason"] = xauusd_skip_decision(
+                    signal["state"],
+                    signal["direction"],
+                    signal,
+                )
+                choose_model(signal["state"], signal)
                 print_signal("XAUUSD TREND SIGNAL", signal)
 
                 stage = "log_signal"
@@ -307,8 +315,16 @@ def run():
 
                 selected_model = choose_model(sim["signal_state"], sim)
                 sim["selected"] = 1 if sim["model"] == selected_model else 0
-                if sim["selected"] == 0 and sim.get("skip_candidate") is True:
-                    sim["skip_reason"] = "SKIP_CANDIDATE_TRUE"
+                if sim["selected"] == 0:
+                    if sim.get("skip_candidate") is True:
+                        sim["skip_reason"] = sim.get("skip_reason") or "SKIP_CANDIDATE_TRUE"
+                    elif sim.get("selection_reason") in {
+                        "blocked_top_up_not_strong",
+                        "blocked_bottom_down_not_strong",
+                    }:
+                        sim["skip_reason"] = sim["selection_reason"]
+                    elif sim.get("selection_reason") == "no_trade":
+                        sim["skip_reason"] = sim.get("skip_reason") or "no_trade"
 
                 if all(cp in sim.get("checkpoint_persisted", set()) for cp in CHECKPOINTS):
                     complete_persisted_simulation(sim, LOG_FILE)

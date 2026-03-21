@@ -23,22 +23,79 @@ def expected_trade_direction(model, signal_direction, signal_state=None):
     return signal_direction
 
 
-def choose_model(state, signal=None):
-    if signal and signal.get("skip_candidate") is True:
+def continuation_allowed(signal=None):
+    if not signal:
+        return True
+
+    signal_direction = signal.get("direction") or signal.get("signal_direction")
+    range_position = signal.get("range_position")
+    trend_state = signal.get("trend_state")
+
+    if range_position == "TOP" and signal_direction == "UP" and trend_state != "STRONG_UP":
+        return False
+
+    if range_position == "BOTTOM" and signal_direction == "DOWN" and trend_state != "STRONG_DOWN":
+        return False
+
+    return True
+
+
+def continuation_block_reason(signal=None):
+    if not signal:
         return None
 
-    if state == "EARLY_DOWN":
-        if signal and signal.get("down_score", 0) > signal.get("up_score", 0):
-            return "continuation"
-        return None
+    signal_direction = signal.get("direction") or signal.get("signal_direction")
+    range_position = signal.get("range_position")
+    trend_state = signal.get("trend_state")
 
-    if state == "EARLY_UP":
-        return "fade"
+    if range_position == "TOP" and signal_direction == "UP" and trend_state != "STRONG_UP":
+        return "blocked_top_up_not_strong"
 
-    if state in {"CONFIRMED_UP", "CONFIRMED_DOWN"}:
-        return "continuation"
+    if range_position == "BOTTOM" and signal_direction == "DOWN" and trend_state != "STRONG_DOWN":
+        return "blocked_bottom_down_not_strong"
 
     return None
+
+
+def choose_model(state, signal=None):
+    if signal and signal.get("skip_candidate") is True:
+        signal["selection_reason"] = signal.get("skip_reason") or "no_trade"
+        return "no_trade"
+
+    if state == "EARLY_DOWN":
+        if signal is not None:
+            signal["selection_reason"] = None
+        if signal and signal.get("trend_state") in {"DOWN", "STRONG_DOWN"}:
+            signal["selection_reason"] = "continuation_selected"
+            return "continuation"
+        if signal is not None:
+            signal["selection_reason"] = "no_trade"
+        return "no_trade"
+
+    if state == "EARLY_UP":
+        if signal is not None:
+            signal["selection_reason"] = None
+        if signal and signal.get("trend_state") in {"UP", "STRONG_UP"}:
+            signal["selection_reason"] = "continuation_selected"
+            return "continuation"
+        if signal is not None:
+            signal["selection_reason"] = "no_trade"
+        return "no_trade"
+
+    if state in {"CONFIRMED_UP", "CONFIRMED_DOWN"}:
+        if signal is not None:
+            signal["selection_reason"] = None
+        if continuation_allowed(signal):
+            if signal is not None:
+                signal["selection_reason"] = "continuation_selected"
+            return "continuation"
+        if signal is not None:
+            signal["selection_reason"] = continuation_block_reason(signal) or "no_trade"
+        return "no_trade"
+
+    if signal is not None:
+        signal["selection_reason"] = "no_trade"
+    return "no_trade"
 
 
 def recent_tick_direction(price_history):
