@@ -1,0 +1,231 @@
+from xauusd_config import CHECKPOINTS, THRESHOLDS, WINDOWS
+
+
+def pct_change(old_price, new_price):
+    if old_price is None or old_price == 0:
+        return None
+    return (new_price - old_price) / old_price
+
+
+def opposite_direction(direction):
+    return "DOWN" if direction == "UP" else "UP"
+
+
+def expected_trade_direction(model, signal_direction, signal_state=None):
+    if model == "continuation":
+        if signal_state and signal_state.endswith("_DOWN"):
+            return "DOWN"
+        if signal_state and signal_state.endswith("_UP"):
+            return "UP"
+        return signal_direction
+    if model == "fade":
+        return opposite_direction(signal_direction)
+    return signal_direction
+
+
+def choose_model(state, signal=None):
+    if signal and signal.get("skip_candidate") is True:
+        return None
+
+    if state == "EARLY_DOWN":
+        if signal and signal.get("down_score", 0) > signal.get("up_score", 0):
+            return "continuation"
+        return None
+
+    if state == "EARLY_UP":
+        return "fade"
+
+    if state in {"CONFIRMED_UP", "CONFIRMED_DOWN"}:
+        return "continuation"
+
+    return None
+
+
+def recent_tick_direction(price_history):
+    if len(price_history) < 3:
+        return None
+
+    p1 = price_history[-3][1]
+    p2 = price_history[-2][1]
+    p3 = price_history[-1][1]
+
+    if p3 > p2 > p1:
+        return "UP"
+    if p3 < p2 < p1:
+        return "DOWN"
+    return "MIXED"
+
+
+def get_price_n_seconds_ago(price_history, now_ts, seconds_back):
+    target = now_ts - seconds_back
+    candidates = [item for item in price_history if item[0] <= target]
+    if not candidates:
+        return None
+    return candidates[-1][1]
+
+
+def compute_metrics(price_history, now_ts, current_price):
+    p1 = get_price_n_seconds_ago(price_history, now_ts, WINDOWS[0])
+    p3 = get_price_n_seconds_ago(price_history, now_ts, WINDOWS[1])
+    p5 = get_price_n_seconds_ago(price_history, now_ts, WINDOWS[2])
+
+    m1 = pct_change(p1, current_price)
+    m3 = pct_change(p3, current_price)
+    m5 = pct_change(p5, current_price)
+
+    return {
+        "price_1m_ago": p1,
+        "price_3m_ago": p3,
+        "price_5m_ago": p5,
+        "move_1m": round(m1, 4) if m1 is not None else None,
+        "move_3m": round(m3, 4) if m3 is not None else None,
+        "move_5m": round(m5, 4) if m5 is not None else None,
+        "recent_tick_direction": recent_tick_direction(price_history),
+    }
+
+
+def score_up(metrics):
+    score = 0
+    m1 = metrics["move_1m"]
+    m3 = metrics["move_3m"]
+    m5 = metrics["move_5m"]
+    tick = metrics["recent_tick_direction"]
+
+    if m1 is not None:
+        if m1 >= THRESHOLDS["move_1m_up_strong"]:
+            score += 2
+        elif m1 >= THRESHOLDS["move_1m_up_soft"]:
+            score += 1
+        elif m1 <= THRESHOLDS["move_1m_down_soft"]:
+            score -= 2
+
+    if m3 is not None:
+        if m3 >= THRESHOLDS["move_3m_up_strong"]:
+            score += 2
+        elif m3 >= THRESHOLDS["move_3m_up_soft"]:
+            score += 1
+        elif m3 <= THRESHOLDS["move_3m_down_soft"]:
+            score -= 2
+
+    if m5 is not None:
+        if m5 >= THRESHOLDS["move_5m_up_strong"]:
+            score += 2
+        elif m5 >= THRESHOLDS["move_5m_up_soft"]:
+            score += 1
+        elif m5 <= THRESHOLDS["move_5m_down_soft"]:
+            score -= 2
+
+    if tick == "UP":
+        score += 1
+    elif tick == "DOWN":
+        score -= 1
+
+    return score
+
+
+def score_down(metrics):
+    score = 0
+    m1 = metrics["move_1m"]
+    m3 = metrics["move_3m"]
+    m5 = metrics["move_5m"]
+    tick = metrics["recent_tick_direction"]
+
+    if m1 is not None:
+        if m1 <= THRESHOLDS["move_1m_down_strong"]:
+            score += 2
+        elif m1 <= THRESHOLDS["move_1m_down_soft"]:
+            score += 1
+        elif m1 >= THRESHOLDS["move_1m_up_soft"]:
+            score -= 2
+
+    if m3 is not None:
+        if m3 <= THRESHOLDS["move_3m_down_strong"]:
+            score += 2
+        elif m3 <= THRESHOLDS["move_3m_down_soft"]:
+            score += 1
+        elif m3 >= THRESHOLDS["move_3m_up_soft"]:
+            score -= 2
+
+    if m5 is not None:
+        if m5 <= THRESHOLDS["move_5m_down_strong"]:
+            score += 2
+        elif m5 <= THRESHOLDS["move_5m_down_soft"]:
+            score += 1
+        elif m5 >= THRESHOLDS["move_5m_up_soft"]:
+            score -= 2
+
+    if tick == "DOWN":
+        score += 1
+    elif tick == "UP":
+        score -= 1
+
+    return score
+
+
+def classify_state(metrics):
+    m1 = metrics["move_1m"]
+    m3 = metrics["move_3m"]
+    m5 = metrics["move_5m"]
+
+    up_score = score_up(metrics)
+    down_score = score_down(metrics)
+
+    if m1 is None or m3 is None:
+        return None, up_score, down_score
+
+    if m5 is not None:
+        if up_score >= THRESHOLDS["confirmed_score"]:
+            return "CONFIRMED_UP", up_score, down_score
+        if down_score >= THRESHOLDS["confirmed_score"]:
+            return "CONFIRMED_DOWN", up_score, down_score
+
+    if up_score >= THRESHOLDS["early_score"] and m3 > 0:
+        return "EARLY_UP", up_score, down_score
+    if down_score >= THRESHOLDS["early_score"] and m3 < 0:
+        return "EARLY_DOWN", up_score, down_score
+
+    if m3 is not None and m5 is not None:
+        if m3 > 0 and m5 > 0 and m1 is not None and m1 < 0 and up_score >= THRESHOLDS["pullback_score"]:
+            return "PULLBACK_UP", up_score, down_score
+        if m3 < 0 and m5 < 0 and m1 is not None and m1 > 0 and down_score >= THRESHOLDS["pullback_score"]:
+            return "PULLBACK_DOWN", up_score, down_score
+
+    return None, up_score, down_score
+
+
+def create_simulations(signal, now_ts):
+    simulations = []
+    for model in ("continuation", "fade"):
+        simulations.append(
+            {
+                "event": "simulation_result",
+                "model": model,
+                "signal_state": signal["state"],
+                "signal_direction": signal["direction"],
+                "trade_direction": expected_trade_direction(
+                    model,
+                    signal["direction"],
+                    signal["state"],
+                ),
+                "entry_price": signal["price_now"],
+                "signal_time": now_ts,
+                "captured": {},
+                "done": False,
+                "move_1m": signal["move_1m"],
+                "move_3m": signal["move_3m"],
+                "move_5m": signal["move_5m"],
+                "up_score": signal["up_score"],
+                "down_score": signal["down_score"],
+            }
+        )
+    return simulations
+
+
+def calc_pnl_pct(trade_direction, entry_price, current_price):
+    if trade_direction == "UP":
+        return (current_price - entry_price) / entry_price
+    return (entry_price - current_price) / entry_price
+
+
+def checkpoint_list():
+    return list(CHECKPOINTS)
