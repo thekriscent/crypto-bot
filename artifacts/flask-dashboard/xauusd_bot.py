@@ -218,3 +218,154 @@ def print_signal(prefix, payload):
     print(prefix)
     print(payload)
     print()
+
+
+def print_simulation_result(sim):
+    print("\nXAUUSD SIM RESULT")
+    print(f"Model: {sim['model']}")
+    print(f"State: {sim['signal_state']}")
+    print(f"Trade direction: {sim['trade_direction']}")
+    print(f"Entry: {sim['entry_price']}")
+    for checkpoint in CHECKPOINTS:
+        cp = sim["captured"][checkpoint]
+        print(f"+{checkpoint}s -> {cp['price']} | pnl {cp['pnl_pct']}")
+    print()
+
+
+def apply_signal_context(sim, signal):
+    for field in (
+        "volatility_state",
+        "range_position",
+        "news_flag",
+        "trend_state",
+        "skip_candidate",
+        "skip_reason",
+        "selection_reason",
+        "high_1h",
+        "low_1h",
+        "high_24h",
+        "low_24h",
+        "ma_5m",
+        "ma_15m",
+        "ma_1h",
+        "price_vs_ma_5m_pct",
+        "price_vs_ma_15m_pct",
+        "price_vs_ma_1h_pct",
+    ):
+        sim[field] = signal[field]
+
+
+def run():
+    init_storage(db_filename=DB_FILE, market=MARKET)
+    open_simulations.extend(normalize_recovered_simulations(recover_open_simulations()))
+    print("Starting XAUUSD scaffold bot...\n")
+
+    while True:
+        if not is_running():
+            time.sleep(SCAN_INTERVAL)
+            continue
+
+        stage = "idle"
+        observed_at_utc = None
+        current_price = None
+        try:
+            now_ts = time.time()
+            stage = "fetch_price"
+            current_price = get_xauusd_spot_price()
+            observed_at_utc = datetime.now(timezone.utc).isoformat()
+
+            price_history.append((now_ts, current_price))
+            prune_history(now_ts)
+
+            stage = "compute_signal"
+            signal, diagnostics = build_signal(now_ts, current_price)
+
+            stage = "log_tick"
+            log_tick(
+                price=current_price,
+                observed_at_epoch=now_ts,
+                observed_at_utc=observed_at_utc,
+                source="env:XAUUSD_DEMO_PRICE" if DEMO_PRICE else PRICE_SOURCE_URLS[0],
+                diagnostics=diagnostics,
+            )
+
+            print(
+                f"XAUUSD: {current_price:.2f} | "
+                f"1m: {diagnostics['move_1m']} | "
+                f"3m: {diagnostics['move_3m']} | "
+                f"5m: {diagnostics['move_5m']} | "
+                f"up_score: {diagnostics['up_score']} | "
+                f"down_score: {diagnostics['down_score']} | "
+                f"state: {diagnostics['state_candidate']} | "
+                f"cooldown_ok: {diagnostics['cooldown_ok']}"
+            )
+
+            if signal:
+                stage = "build_signal_context"
+                signal.update(build_signal_context(now_ts, current_price, observed_at_utc))
+                signal["skip_candidate"], signal["skip_reason"] = xauusd_skip_decision(
+                    signal["state"],
+                    signal["direction"],
+                    signal,
+                )
+                choose_model(signal["state"], signal)
+                print_signal("XAUUSD TREND SIGNAL", signal)
+
+                stage = "log_signal"
+                log_entry(signal, LOG_FILE)
+
+                stage = "create_open_simulations"
+                for sim in create_simulations(signal, now_ts):
+                    apply_signal_context(sim, signal)
+                    persist_open_simulation(sim)
+                    open_simulations.append(sim)
+
+            stage = "update_simulations"
+            update_simulations(now_ts, current_price)
+
+            stage = "persist_checkpoints"
+            for sim in open_simulations:
+                persist_pending_checkpoints(sim)
+
+            stage = "finalize_simulations"
+            for sim in open_simulations:
+                if not sim["done"] or sim.get("finalized"):
+                    continue
+
+                selected_model = choose_model(sim["signal_state"], sim)
+                sim["selected"] = 1 if sim["model"] == selected_model else 0
+                if sim["selected"] == 0:
+                    if sim.get("skip_candidate") is True:
+                        sim["skip_reason"] = sim.get("skip_reason") or "SKIP_CANDIDATE_TRUE"
+                    elif sim.get("selection_reason") in {
+                        "blocked_top_up_not_strong",
+                        "blocked_bottom_down_not_strong",
+                    }:
+                        sim["skip_reason"] = sim["selection_reason"]
+                    elif sim.get("selection_reason") == "no_trade":
+                        sim["skip_reason"] = sim.get("skip_reason") or "no_trade"
+
+                if all(cp in sim.get("checkpoint_persisted", set()) for cp in CHECKPOINTS):
+                    complete_persisted_simulation(sim, LOG_FILE)
+                    sim["finalized"] = True
+                    print_simulation_result(sim)
+
+            open_simulations[:] = [sim for sim in open_simulations if not sim.get("finalized")]
+
+        except Exception as error:
+            record_error_event(
+                source=f"xauusd_bot.{stage}",
+                error=error,
+                context={
+                    "observed_at_utc": observed_at_utc,
+                    "current_price": current_price,
+                    "pid": os.getpid(),
+                },
+            )
+            print(f"XAUUSD scaffold error: {error}")
+
+        time.sleep(SCAN_INTERVAL)
+
+
+if __name__ == "__main__":
+    run()
