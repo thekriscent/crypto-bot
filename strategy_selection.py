@@ -18,6 +18,8 @@ def choose_model(state, signal=None):
         return None
 
     if state in ["CONFIRMED_UP", "CONFIRMED_DOWN"]:
+        if signal and signal.get("volatility_state") == "LOW":
+            return None
         return "continuation"
 
     return None
