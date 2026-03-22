@@ -1,0 +1,11 @@
+{
+  "scenario_id": "2022-11-11_ftx_collapse",
+  "title": "FTX collapse stress window",
+  "description": "Minimal scenario scaffold for replay/testing around the November 2022 FTX-driven BTC selloff.",
+  "start_utc": "2022-11-11T14:00:00+00:00",
+  "end_utc": "2022-11-11T14:10:00+00:00",
+  "notes": [
+    "Synthetic minute prices are used until a dedicated BTC candle dataset is added.",
+    "Headlines are provided as lightweight JSONL inputs for news-flag replay testing."
+  ]
+}

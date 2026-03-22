@@ -7,4 +7,7 @@ __pycache__/
 *.sqlite3
 trend_bot_log*.json
 .DS_Store
-
+replay/btc/outputs/runs/
+replay/btc/scenarios/**/*.csv
+replay/btc/scenarios/**/*.parquet
+replay/btc/scenarios/**/*.feather
