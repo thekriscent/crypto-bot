@@ -17,8 +17,21 @@ def choose_model(state, signal=None):
             return "fade"
         return None
 
-    if state in ["CONFIRMED_UP", "CONFIRMED_DOWN"]:
+    if state == "CONFIRMED_DOWN":
         if signal and signal.get("volatility_state") == "LOW":
+            return None
+        if signal and signal.get("range_position") == "BOTTOM":
+            return None
+        return "continuation"
+
+    if state == "CONFIRMED_UP":
+        if signal and signal.get("volatility_state") == "LOW":
+            return None
+        if (
+            signal
+            and signal.get("range_position") == "TOP"
+            and signal.get("trend_state") in {"FLAT", "DOWN"}
+        ):
             return None
         return "continuation"
 
