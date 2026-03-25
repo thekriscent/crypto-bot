@@ -3,6 +3,21 @@ from market_context import (
     range_position,
     volatility_state,
 )
+from xauusd_config import THRESHOLDS, WINDOWS
+
+
+def _price_n_seconds_ago(price_history, now_ts, seconds_back):
+    target = now_ts - seconds_back
+    candidates = [item for item in price_history if item[0] <= target]
+    if not candidates:
+        return None
+    return candidates[-1][1]
+
+
+def _pct_change(old_price, new_price):
+    if old_price is None or old_price == 0:
+        return None
+    return (new_price - old_price) / old_price
 
 
 def _recent_directional_consistency(price_history):
@@ -58,6 +73,29 @@ def _xau_trend_state(price_history, now_ts, current_price):
         return "UP", indicators
 
     if ma_alignment_down and price_below_both:
+        return "DOWN", indicators
+
+    p1 = _price_n_seconds_ago(price_history, now_ts, WINDOWS[0])
+    p3 = _price_n_seconds_ago(price_history, now_ts, WINDOWS[1])
+    p5 = _price_n_seconds_ago(price_history, now_ts, WINDOWS[2])
+    move_1m = _pct_change(p1, current_price)
+    move_3m = _pct_change(p3, current_price)
+    move_5m = _pct_change(p5, current_price)
+
+    if (
+        directional_consistency == "UP"
+        and move_1m is not None and move_1m >= THRESHOLDS["move_1m_up_soft"]
+        and move_3m is not None and move_3m >= THRESHOLDS["move_3m_up_soft"]
+        and move_5m is not None and move_5m >= THRESHOLDS["move_5m_up_soft"]
+    ):
+        return "UP", indicators
+
+    if (
+        directional_consistency == "DOWN"
+        and move_1m is not None and move_1m <= THRESHOLDS["move_1m_down_soft"]
+        and move_3m is not None and move_3m <= THRESHOLDS["move_3m_down_soft"]
+        and move_5m is not None and move_5m <= THRESHOLDS["move_5m_down_soft"]
+    ):
         return "DOWN", indicators
 
     return "FLAT", indicators

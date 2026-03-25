@@ -127,28 +127,18 @@ def _is_exhaustion_extreme(direction, range_position):
 
 def _weakening_follow_through_up(signal):
     m1 = signal.get("move_1m")
-    m3 = signal.get("move_3m")
     m5 = signal.get("move_5m")
     if m5 is None or m1 is None:
         return False
-    if m5 > 0 and m1 <= 0:
-        return True
-    if m5 > 0 and m3 is not None and m1 < m3 * 0.5:
-        return True
-    return False
+    return m5 > 0 and m1 <= 0
 
 
 def _weakening_follow_through_down(signal):
     m1 = signal.get("move_1m")
-    m3 = signal.get("move_3m")
     m5 = signal.get("move_5m")
     if m5 is None or m1 is None:
         return False
-    if m5 < 0 and m1 >= 0:
-        return True
-    if m5 < 0 and m3 is not None and m1 > m3 * 0.5:
-        return True
-    return False
+    return m5 < 0 and m1 >= 0
 
 
 def _early_reversal_quality_ok(signal, state):

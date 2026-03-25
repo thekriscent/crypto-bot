@@ -235,9 +235,29 @@ def print_simulation_result(sim):
 def determine_regime(signal):
     volatility_state = signal.get("volatility_state")
     trend_state = signal.get("trend_state")
+    move_1m = signal.get("move_1m")
+    move_3m = signal.get("move_3m")
+    move_5m = signal.get("move_5m")
+    up_score = signal.get("up_score", 0)
+    down_score = signal.get("down_score", 0)
+
     if volatility_state == "LOW":
         return "NO_TRADE"
-    if trend_state in {"STRONG_UP", "STRONG_DOWN"}:
+    if trend_state in {"UP", "DOWN", "STRONG_UP", "STRONG_DOWN"}:
+        return "TREND"
+    if (
+        move_1m is not None and move_1m > 0
+        and move_3m is not None and move_3m > 0
+        and move_5m is not None and move_5m > 0
+        and up_score >= 4
+    ):
+        return "TREND"
+    if (
+        move_1m is not None and move_1m < 0
+        and move_3m is not None and move_3m < 0
+        and move_5m is not None and move_5m < 0
+        and down_score >= 4
+    ):
         return "TREND"
     return "RANGE"
 
