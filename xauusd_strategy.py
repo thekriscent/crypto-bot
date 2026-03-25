@@ -45,6 +45,86 @@ def _all_momentum_negative(signal):
     )
 
 
+def _trend_aligned(direction, trend_state):
+    if direction == "UP":
+        return trend_state in {"UP", "STRONG_UP"}
+    return trend_state in {"DOWN", "STRONG_DOWN"}
+
+
+def _ma_aligned(direction, ma_pct):
+    if ma_pct is None:
+        return False
+    if direction == "UP":
+        return ma_pct >= 0
+    return ma_pct <= 0
+
+
+def _core_continuation_ok(signal, direction):
+    move_1m = signal.get("move_1m")
+    trend_state = signal.get("trend_state")
+    ma_pct = signal.get("price_vs_ma_1h_pct")
+
+    if move_1m is None:
+        return False
+    if direction == "UP" and move_1m <= 0:
+        return False
+    if direction == "DOWN" and move_1m >= 0:
+        return False
+
+    return _trend_aligned(direction, trend_state) and _ma_aligned(direction, ma_pct)
+
+
+def _strong_extreme_continuation_ok(signal, direction):
+    move_1m = signal.get("move_1m")
+    move_3m = signal.get("move_3m")
+    trend_state = signal.get("trend_state")
+    ma_pct = signal.get("price_vs_ma_1h_pct")
+
+    if move_1m is None or move_3m is None:
+        return False
+
+    if direction == "UP":
+        return (
+            trend_state == "STRONG_UP"
+            and _all_momentum_positive(signal)
+            and ma_pct is not None and ma_pct > 0
+            and move_1m >= move_3m
+        )
+
+    return (
+        trend_state == "STRONG_DOWN"
+        and _all_momentum_negative(signal)
+        and ma_pct is not None and ma_pct < 0
+        and move_1m <= move_3m
+    )
+
+
+def _late_cycle_top_reversal_ok(signal):
+    move_1m = signal.get("move_1m")
+    move_3m = signal.get("move_3m")
+    ma_pct = signal.get("price_vs_ma_1h_pct")
+
+    if _weakening_follow_through_up(signal):
+        return True
+    return (
+        ma_pct is not None and ma_pct >= 0.006
+        and move_1m is not None
+        and move_3m is not None
+        and move_1m <= move_3m
+    )
+
+
+def _late_cycle_bottom_reversal_ok(signal):
+    return _weakening_follow_through_down(signal)
+
+
+def _is_exhaustion_extreme(direction, range_position):
+    return (
+        (direction == "UP" and range_position == "TOP")
+        or (direction == "DOWN" and range_position == "BOTTOM")
+    )
+
+
 def _weakening_follow_through_up(signal):
     m1 = signal.get("move_1m")
     m3 = signal.get("move_3m")
@@ -87,25 +167,27 @@ def _early_reversal_quality_ok(signal, state):
 def continuation_allowed(signal=None):
     if not signal:
         return True
+
     signal_direction = signal.get("direction") or signal.get("signal_direction")
     range_position = signal.get("range_position")
-    trend_state = signal.get("trend_state")
-    if range_position == "TOP" and signal_direction == "UP" and trend_state != "STRONG_UP":
+    if not _core_continuation_ok(signal, signal_direction):
         return False
-    if range_position == "BOTTOM" and signal_direction == "DOWN" and trend_state != "STRONG_DOWN":
-        return False
+    if _is_exhaustion_extreme(signal_direction, range_position):
+        return _strong_extreme_continuation_ok(signal, signal_direction)
     return True
 
 
 def continuation_block_reason(signal=None):
     if not signal:
         return None
+
     signal_direction = signal.get("direction") or signal.get("signal_direction")
     range_position = signal.get("range_position")
-    trend_state = signal.get("trend_state")
-    if range_position == "TOP" and signal_direction == "UP" and trend_state != "STRONG_UP":
+    if not _core_continuation_ok(signal, signal_direction):
+        return "blocked_continuation_misaligned_context"
+    if range_position == "TOP" and signal_direction == "UP" and not _strong_extreme_continuation_ok(signal, signal_direction):
         return "blocked_continuation_top_exhaustion"
-    if range_position == "BOTTOM" and signal_direction == "DOWN" and trend_state != "STRONG_DOWN":
+    if range_position == "BOTTOM" and signal_direction == "DOWN" and not _strong_extreme_continuation_ok(signal, signal_direction):
         return "blocked_continuation_bottom_exhaustion"
     return None
 
@@ -126,7 +208,6 @@ def choose_model(state, signal=None):
 
     trend_state = signal.get("trend_state") if signal else None
     range_position = signal.get("range_position") if signal else None
-    ma_pct = signal.get("price_vs_ma_1h_pct") if signal else None
 
     if state == "EARLY_UP":
         if signal and range_position == "TOP" and _early_reversal_quality_ok(signal, state):
@@ -135,7 +216,7 @@ def choose_model(state, signal=None):
                 return "no_trade"
             signal["selection_reason"] = "fade_selected_top_reversal"
             return "fade"
-        if signal and trend_state in {"UP", "STRONG_UP"}:
+        if signal and _core_continuation_ok(signal, "UP"):
             if regime == "RANGE":
                 signal["selection_reason"] = "regime_range_blocks_continuation"
                 return "no_trade"
@@ -152,7 +233,7 @@ def choose_model(state, signal=None):
                 return "no_trade"
             signal["selection_reason"] = "fade_selected_bottom_reversal"
             return "fade"
-        if signal and trend_state in {"DOWN", "STRONG_DOWN"}:
+        if signal and _core_continuation_ok(signal, "DOWN"):
             if regime == "RANGE":
                 signal["selection_reason"] = "regime_range_blocks_continuation"
                 return "no_trade"
@@ -167,15 +248,9 @@ def choose_model(state, signal=None):
 
         if trend_state == "FLAT":
             if signal and is_up and _weakening_follow_through_up(signal):
-                if regime == "TREND":
-                    signal["selection_reason"] = "regime_trend_blocks_fade"
-                    return "no_trade"
                 signal["selection_reason"] = "fade_selected_top_reversal"
                 return "fade"
             if signal and not is_up and _weakening_follow_through_down(signal):
-                if regime == "TREND":
-                    signal["selection_reason"] = "regime_trend_blocks_fade"
-                    return "no_trade"
                 signal["selection_reason"] = "fade_selected_bottom_reversal"
                 return "fade"
             if signal is not None:
@@ -183,20 +258,7 @@ def choose_model(state, signal=None):
             return "no_trade"
 
         if is_up and range_position == "TOP":
-            if (
-                trend_state == "STRONG_UP"
-                and signal and _all_momentum_positive(signal)
-                and ma_pct is not None and ma_pct > 0
-            ):
-                if regime == "RANGE":
-                    signal["selection_reason"] = "regime_range_blocks_continuation"
-                    return "no_trade"
-                signal["selection_reason"] = "continuation_selected"
-                return "continuation"
-            if signal and _weakening_follow_through_up(signal):
-                if regime == "TREND":
-                    signal["selection_reason"] = "regime_trend_blocks_fade"
-                    return "no_trade"
+            if signal and _late_cycle_top_reversal_ok(signal):
                 signal["selection_reason"] = "fade_selected_top_reversal"
                 return "fade"
             if signal is not None:
@@ -204,32 +266,43 @@ def choose_model(state, signal=None):
             return "no_trade"
 
         if not is_up and range_position == "BOTTOM":
-            if (
-                trend_state == "STRONG_DOWN"
-                and signal and _all_momentum_negative(signal)
-                and ma_pct is not None and ma_pct < 0
-            ):
+            if signal and _late_cycle_bottom_reversal_ok(signal):
+                signal["selection_reason"] = "fade_selected_bottom_reversal"
+                return "fade"
+            if signal and _strong_extreme_continuation_ok(signal, "DOWN"):
                 if regime == "RANGE":
                     signal["selection_reason"] = "regime_range_blocks_continuation"
                     return "no_trade"
                 signal["selection_reason"] = "continuation_selected"
                 return "continuation"
-            if signal and _weakening_follow_through_down(signal):
-                if regime == "TREND":
-                    signal["selection_reason"] = "regime_trend_blocks_fade"
-                    return "no_trade"
-                signal["selection_reason"] = "fade_selected_bottom_reversal"
-                return "fade"
             if signal is not None:
                 signal["selection_reason"] = "blocked_continuation_bottom_exhaustion"
             return "no_trade"
 
-        if regime == "RANGE":
+        if is_up:
+            if signal and _core_continuation_ok(signal, "UP") and not _weakening_follow_through_up(signal):
+                if regime == "RANGE":
+                    signal["selection_reason"] = "regime_range_blocks_continuation"
+                    return "no_trade"
+                signal["selection_reason"] = "continuation_selected"
+                return "continuation"
             if signal is not None:
-                signal["selection_reason"] = "regime_range_blocks_continuation"
+                signal["selection_reason"] = "blocked_continuation_misaligned_context"
             return "no_trade"
-        if signal is not None:
-            signal["selection_reason"] = "continuation_selected"
+
+        if signal and not _core_continuation_ok(signal, "DOWN"):
+            signal["selection_reason"] = "blocked_continuation_misaligned_context"
+            return "no_trade"
+
+        if signal and _late_cycle_bottom_reversal_ok(signal):
+            signal["selection_reason"] = "fade_selected_late_cycle_reversal"
+            return "fade"
+
+        if regime == "RANGE":
+            signal["selection_reason"] = "regime_range_blocks_continuation"
+            return "no_trade"
+
+        signal["selection_reason"] = "continuation_selected"
         return "continuation"
 
     if signal is not None:

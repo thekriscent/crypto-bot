@@ -232,12 +232,23 @@ def print_simulation_result(sim):
     print()
 
 
+def determine_regime(signal):
+    volatility_state = signal.get("volatility_state")
+    trend_state = signal.get("trend_state")
+    if volatility_state == "LOW":
+        return "NO_TRADE"
+    if trend_state in {"STRONG_UP", "STRONG_DOWN"}:
+        return "TREND"
+    return "RANGE"
+
+
 def apply_signal_context(sim, signal):
     for field in (
         "volatility_state",
         "range_position",
         "news_flag",
         "trend_state",
+        "regime",
         "skip_candidate",
         "skip_reason",
         "selection_reason",
@@ -264,7 +275,6 @@ def run():
         if not is_running():
             time.sleep(SCAN_INTERVAL)
             continue
-
         stage = "idle"
         observed_at_utc = None
         current_price = None
@@ -308,6 +318,10 @@ def run():
                     signal["direction"],
                     signal,
                 )
+                signal["regime"] = determine_regime(signal)
+                if signal["regime"] == "NO_TRADE":
+                    signal["skip_candidate"] = True
+                    signal["skip_reason"] = "regime_no_trade"
                 choose_model(signal["state"], signal)
                 print_signal("XAUUSD TREND SIGNAL", signal)
 
